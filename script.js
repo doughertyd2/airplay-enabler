@@ -1,95 +1,47 @@
 // ==UserScript==
-// @name         Fetch & Open HLS for AirPlay
+// @name         Force-Native HLS → AirPlay video
 // @namespace    https://example.com/
-// @version      1.0
-// @description  Detect HLS manifests and give you a one-click way to open them (so you get full AirPlay video)
-// @match        *://*/*
+// @version      0.2
+// @description  Disable MSE-based players (hls.js, video.js, etc.) so Safari uses its native HLS path.
+// @match        *://target-site.example/*          //  ❱❱ change to the real domain
+// @run-at       document-start                     //  IMPORTANT: must execute before players load
 // @grant        none
 // ==/UserScript==
 
-(function () {
-	"use strict";
-
-	// --- 1) Inject the button
-	const btn = document.createElement("button");
-	btn.textContent = "🎬";
-	Object.assign(btn.style, {
-		position: "fixed",
-		bottom: "12px",
-		left: "12px",
-		width: "36px",
-		height: "36px",
-		"font-size": "20px",
-		"border-radius": "18px",
-		border: "none",
-		background: "#007AFF",
-		color: "#fff",
-		cursor: "pointer",
-		display: "none",
-		"z-index": 9999,
-	});
-	document.body.appendChild(btn);
-
-	// --- 2) Track whether we've seen a <video> on screen
-	let sawVideo = false;
-	const obs = new MutationObserver((muts) => {
-		for (let m of muts) {
-			m.addedNodes.forEach((node) => {
-				if (!sawVideo && node.tagName === "VIDEO") {
-					sawVideo = true;
-					tryShowButton();
-				} else if (!sawVideo && node.querySelectorAll) {
-					if (node.querySelector("video")) {
-						sawVideo = true;
-						tryShowButton();
-					}
-				}
-			});
-		}
-	});
-	obs.observe(document.documentElement, { childList: true, subtree: true });
-	// also check for existing videos on load
-	if (document.querySelector("video")) {
-		sawVideo = true;
+(() => {
+	/* 1 ─── Kill MediaSource so libraries think MSE is unavailable */
+	try {
+		Object.defineProperty(window, "MediaSource", { value: undefined, configurable: true });
+		Object.defineProperty(window, "ManagedMediaSource", { value: undefined, configurable: true });
+	} catch (e) {
+		/* ignored */
 	}
 
-	// --- 3) Hook fetch() and XHR to capture .m3u8 URLs
-	let lastManifest = null;
-
-	// fetch
-	const _fetch = window.fetch;
-	window.fetch = function (input, init) {
-		const url = typeof input === "string" ? input : input.url;
-		if (url && url.match(/\.m3u8(\?|$)/i)) {
-			lastManifest = url;
-			tryShowButton();
+	/* 2 ─── If hls.js shows up, sabotage its feature-test */
+	const hookHls = (Hls) => {
+		if (Hls && typeof Hls.isSupported === "function") {
+			Hls.isSupported = () => false; // force “unsupported → don’t attach”
 		}
-		return _fetch.apply(this, arguments);
 	};
-
-	// XHR
-	const _open = XMLHttpRequest.prototype.open;
-	XMLHttpRequest.prototype.open = function (method, url) {
-		if (url && url.match(/\.m3u8(\?|$)/i)) {
-			lastManifest = url;
-			tryShowButton();
-		}
-		return _open.apply(this, arguments);
-	};
-
-	// --- 4) Show the button only when both conditions are met
-	function tryShowButton() {
-		if (sawVideo && lastManifest) {
-			btn.style.display = "block";
-		}
-	}
-
-	// --- 5) On click, open the manifest URL
-	btn.addEventListener("click", () => {
-		if (lastManifest) {
-			window.open(lastManifest, "_blank");
-		} else {
-			alert("No HLS manifest detected yet. Play the video and try again.");
-		}
+	Object.defineProperty(window, "Hls", {
+		configurable: true,
+		set(v) {
+			hookHls(v);
+			this.__hls = v;
+		},
+		get() {
+			return this.__hls;
+		},
 	});
+
+	/* 3 ─── Nudge video.js / VHS not to override native HLS */
+	const patchVideoJs = () => {
+		if (window.videojs?.options?.html5?.hls) {
+			window.videojs.options.html5.hls.overrideNative = false; // VHS flag :contentReference[oaicite:2]{index=2}
+		}
+	};
+	const timer = setInterval(() => {
+		patchVideoJs();
+		if (window.videojs) clearInterval(timer);
+	}, 300);
 })();
