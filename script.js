@@ -1,88 +1,95 @@
 // ==UserScript==
-// @name         AirPlay Always On (Ultimate Global)
-// @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Force full AirPlay (video+audio) on every page and iframe, by patching media element creation & attributes globally.
+// @name         Fetch & Open HLS for AirPlay
+// @namespace    https://example.com/
+// @version      1.0
+// @description  Detect HLS manifests and give you a one-click way to open them (so you get full AirPlay video)
 // @match        *://*/*
-// @run-at       document-start
-// @all-frames   true
 // @grant        none
 // ==/UserScript==
+
 (function () {
 	"use strict";
 
-	// 1️⃣ Always report disableRemotePlayback as false
-	Object.defineProperty(HTMLMediaElement.prototype, "disableRemotePlayback", {
-		configurable: true,
-		get: () => false,
-		set: () => {
-			/* ignore */
-		},
+	// --- 1) Inject the button
+	const btn = document.createElement("button");
+	btn.textContent = "🎬";
+	Object.assign(btn.style, {
+		position: "fixed",
+		bottom: "12px",
+		left: "12px",
+		width: "36px",
+		height: "36px",
+		"font-size": "20px",
+		"border-radius": "18px",
+		border: "none",
+		background: "#007AFF",
+		color: "#fff",
+		cursor: "pointer",
+		display: "none",
+		"z-index": 9999,
 	});
+	document.body.appendChild(btn);
 
-	// 2️⃣ Patch document.createElement so any new <video> or <audio> starts with our attrs
-	const origCreate = Document.prototype.createElement;
-	Document.prototype.createElement = function (tagName, options) {
-		const el = origCreate.call(this, tagName, options);
-		if (tagName.toUpperCase() === "VIDEO" || tagName.toUpperCase() === "AUDIO") {
-			el.setAttribute("x-webkit-airplay", "allow");
-			el.setAttribute("playsinline", "");
-			el.setAttribute("webkit-playsinline", "");
-			el.removeAttribute("disableRemotePlayback");
-		}
-		return el;
-	};
-
-	// 3️⃣ Intercept any setAttribute/removeAttribute calls on media elements
-	const origSetAttr = Element.prototype.setAttribute;
-	Element.prototype.setAttribute = function (name, value) {
-		if (this.tagName === "VIDEO" || this.tagName === "AUDIO") {
-			const n = name.toLowerCase();
-			if (n === "disableremoteplayback") return; // block attempts to re-disable
-			if (n === "x-webkit-airplay" && value !== "allow") {
-				// force allow
-				value = "allow";
-			}
-			if (n === "playsinline" || n === "webkit-playsinline") {
-				// leave as-is
-			}
-		}
-		return origSetAttr.call(this, name, value);
-	};
-	const origRemoveAttr = Element.prototype.removeAttribute;
-	Element.prototype.removeAttribute = function (name) {
-		if ((this.tagName === "VIDEO" || this.tagName === "AUDIO") && name.toLowerCase() === "x-webkit-airplay") {
-			return; // don’t let pages remove our allow flag
-		}
-		return origRemoveAttr.call(this, name);
-	};
-
-	// 4️⃣ Patch any existing media tags as soon as possible
-	const patchMedia = (el) => {
-		try {
-			el.setAttribute("x-webkit-airplay", "allow");
-			el.setAttribute("playsinline", "");
-			el.setAttribute("webkit-playsinline", "");
-			el.removeAttribute("disableRemotePlayback");
-		} catch (e) {}
-	};
-	const observer = new MutationObserver((muts) => {
-		muts.forEach((m) => {
+	// --- 2) Track whether we've seen a <video> on screen
+	let sawVideo = false;
+	const obs = new MutationObserver((muts) => {
+		for (let m of muts) {
 			m.addedNodes.forEach((node) => {
-				if (node.nodeType !== 1) return;
-				if (node.tagName === "VIDEO" || node.tagName === "AUDIO") {
-					patchMedia(node);
-				} else if (node.querySelectorAll) {
-					node.querySelectorAll("video, audio").forEach(patchMedia);
+				if (!sawVideo && node.tagName === "VIDEO") {
+					sawVideo = true;
+					tryShowButton();
+				} else if (!sawVideo && node.querySelectorAll) {
+					if (node.querySelector("video")) {
+						sawVideo = true;
+						tryShowButton();
+					}
 				}
 			});
-		});
+		}
 	});
-	observer.observe(document.documentElement || document, {
-		childList: true,
-		subtree: true,
-	});
+	obs.observe(document.documentElement, { childList: true, subtree: true });
+	// also check for existing videos on load
+	if (document.querySelector("video")) {
+		sawVideo = true;
+	}
 
-	// 5️⃣ Also patch anything already in the DOM right now
-	document.querySelectorAll("video, audio").forEach(patchMedia);
+	// --- 3) Hook fetch() and XHR to capture .m3u8 URLs
+	let lastManifest = null;
+
+	// fetch
+	const _fetch = window.fetch;
+	window.fetch = function (input, init) {
+		const url = typeof input === "string" ? input : input.url;
+		if (url && url.match(/\.m3u8(\?|$)/i)) {
+			lastManifest = url;
+			tryShowButton();
+		}
+		return _fetch.apply(this, arguments);
+	};
+
+	// XHR
+	const _open = XMLHttpRequest.prototype.open;
+	XMLHttpRequest.prototype.open = function (method, url) {
+		if (url && url.match(/\.m3u8(\?|$)/i)) {
+			lastManifest = url;
+			tryShowButton();
+		}
+		return _open.apply(this, arguments);
+	};
+
+	// --- 4) Show the button only when both conditions are met
+	function tryShowButton() {
+		if (sawVideo && lastManifest) {
+			btn.style.display = "block";
+		}
+	}
+
+	// --- 5) On click, open the manifest URL
+	btn.addEventListener("click", () => {
+		if (lastManifest) {
+			window.open(lastManifest, "_blank");
+		} else {
+			alert("No HLS manifest detected yet. Play the video and try again.");
+		}
+	});
 })();
